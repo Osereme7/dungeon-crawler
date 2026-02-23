@@ -33,6 +33,9 @@ jobs:
       - name: Check Prettier formatting
         run: npx prettier --check "src/**/*.ts" "tests/**/*.ts"
 
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
