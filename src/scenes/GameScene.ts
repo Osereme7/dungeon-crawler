@@ -1,50 +1,46 @@
 import Phaser from 'phaser';
-import { TILE_SIZE, GAME_WIDTH, COLORS } from '../constants';
+import { TILE_SIZE, COLORS } from '../constants';
+import { generateDungeon, DungeonData, TILE_FLOOR } from '../dungeon/DungeonGenerator';
+import { getDungeonParams } from '../dungeon/DungeonConfig';
+import { Player } from '../entities/Player';
+import { Enemy, ENEMY_CONFIGS, EnemyType } from '../entities/enemies/Enemy';
+import { WorldItem, ITEM_CONFIGS } from '../entities/items/Item';
+import { resolveAttack, calculateXpReward } from '../systems/CombatSystem';
+import { canMoveTo } from '../systems/MovementSystem';
+import { addItem, InventoryItem } from '../systems/InventorySystem';
+import { rollLoot } from '../systems/LootTable';
+import { createVisibilityMap, updateFOV, Visibility } from '../systems/FOVSystem';
+import { findPath } from '../utils/Pathfinding';
+import { manhattanDistance } from '../utils/TileUtils';
+import { randomPick, randomInt } from '../utils/Random';
+import { showDamageNumber } from '../ui/DamageNumbers';
+
+const FOV_RADIUS = 8;
+const ENEMY_TYPES: EnemyType[] = ['slime', 'bat', 'skeleton'];
 
 export class GameScene extends Phaser.Scene {
-  private player!: Phaser.GameObjects.Rectangle;
-  private walls: Phaser.GameObjects.Rectangle[] = [];
-  private floors: Phaser.GameObjects.Rectangle[] = [];
+  private player!: Player;
+  private enemies: Enemy[] = [];
+  private items: WorldItem[] = [];
+  private dungeon!: DungeonData;
+  private visMap!: Visibility[][];
+  private floor = 1;
+  private tileGraphics!: Phaser.GameObjects.Graphics;
+  private stairsSprite!: Phaser.GameObjects.Rectangle;
+
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd!: Record<string, Phaser.Input.Keyboard.Key>;
-  private isMoving = false;
-  private dungeonWidth = 40;
-  private dungeonHeight = 30;
-  private grid: number[][] = [];
-  private playerTileX = 0;
-  private playerTileY = 0;
+  private inputCooldown = 0;
+  private isProcessingTurn = false;
 
   constructor() {
     super({ key: 'GameScene' });
   }
 
   create() {
-    // Generate a simple dungeon
-    this.generateDungeon();
-    this.renderDungeon();
-
-    // Create player at starting position
-    const startRoom = this.findOpenTile();
-    this.playerTileX = startRoom.x;
-    this.playerTileY = startRoom.y;
-
-    this.player = this.add.rectangle(
-      this.playerTileX * TILE_SIZE + TILE_SIZE / 2,
-      this.playerTileY * TILE_SIZE + TILE_SIZE / 2,
-      TILE_SIZE - 2,
-      TILE_SIZE - 2,
-      COLORS.PLAYER,
-    );
-
-    // Camera follows player
-    this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
-    this.cameras.main.setZoom(2);
-    this.cameras.main.setBounds(
-      0,
-      0,
-      this.dungeonWidth * TILE_SIZE,
-      this.dungeonHeight * TILE_SIZE,
-    );
+    this.floor = 1;
+    this.enemies = [];
+    this.items = [];
 
     // Input
     this.cursors = this.input.keyboard!.createCursorKeys();
@@ -55,19 +51,28 @@ export class GameScene extends Phaser.Scene {
       right: Phaser.Input.Keyboard.KeyCodes.D,
     }) as Record<string, Phaser.Input.Keyboard.Key>;
 
-    // Floor indicator
-    this.add
-      .text(GAME_WIDTH / 2, 16, 'Floor 1 - Use WASD to explore', {
-        fontSize: '12px',
-        color: COLORS.UI_TEXT,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(100);
+    // Use items with number keys
+    this.input.keyboard!.on('keydown-ONE', () => this.useInventoryItem(0));
+    this.input.keyboard!.on('keydown-TWO', () => this.useInventoryItem(1));
+    this.input.keyboard!.on('keydown-THREE', () => this.useInventoryItem(2));
+    this.input.keyboard!.on('keydown-FOUR', () => this.useInventoryItem(3));
+    this.input.keyboard!.on('keydown-FIVE', () => this.useInventoryItem(4));
+
+    // Tile rendering
+    this.tileGraphics = this.add.graphics();
+
+    // Launch UI
+    this.scene.launch('UIScene');
+
+    // Generate first floor
+    this.generateFloor();
   }
 
-  update() {
-    if (this.isMoving) return;
+  update(_time: number, delta: number) {
+    if (this.isProcessingTurn) return;
+
+    this.inputCooldown -= delta;
+    if (this.inputCooldown > 0) return;
 
     let dx = 0;
     let dy = 0;
@@ -79,126 +84,430 @@ export class GameScene extends Phaser.Scene {
 
     if (dx === 0 && dy === 0) return;
 
-    const newX = this.playerTileX + dx;
-    const newY = this.playerTileY + dy;
+    this.inputCooldown = 130;
+    this.processTurn(dx, dy);
+  }
 
-    // Check bounds and walls
-    if (
-      newX < 0 ||
-      newX >= this.dungeonWidth ||
-      newY < 0 ||
-      newY >= this.dungeonHeight ||
-      this.grid[newY][newX] === 1
-    ) {
-      return;
+  private async processTurn(dx: number, dy: number) {
+    this.isProcessingTurn = true;
+
+    const newX = this.player.tileX + dx;
+    const newY = this.player.tileY + dy;
+
+    // Check for enemy at target position (bump attack)
+    const targetEnemy = this.enemies.find(
+      (e) => e.isAlive() && e.tileX === newX && e.tileY === newY,
+    );
+
+    if (targetEnemy) {
+      await this.attackEnemy(targetEnemy);
+    } else if (canMoveTo(this.dungeon.grid, newX, newY)) {
+      await this.player.moveTo(this, newX, newY);
+      this.pickupItems();
+      this.checkStairs();
     }
 
-    // Move player
-    this.isMoving = true;
-    this.playerTileX = newX;
-    this.playerTileY = newY;
+    // Enemy turns
+    await this.processEnemyTurns();
 
-    this.tweens.add({
-      targets: this.player,
-      x: newX * TILE_SIZE + TILE_SIZE / 2,
-      y: newY * TILE_SIZE + TILE_SIZE / 2,
-      duration: 100,
-      ease: 'Power2',
-      onComplete: () => {
-        this.isMoving = false;
-      },
+    // Update FOV
+    this.updateVisibility();
+
+    // Emit UI events
+    this.emitUIUpdates();
+
+    this.isProcessingTurn = false;
+  }
+
+  private async attackEnemy(enemy: Enemy) {
+    const result = resolveAttack(
+      { ...this.player.stats, attack: this.player.getEffectiveAttack() },
+      enemy.stats,
+    );
+
+    enemy.takeDamage(result.damage);
+    enemy.flashDamage(this);
+    showDamageNumber(this, enemy.tileX, enemy.tileY, result.damage, result.isCritical);
+
+    const critText = result.isCritical ? ' CRITICAL!' : '';
+    this.events.emit('message', `You hit ${enemy.name} for ${result.damage} damage!${critText}`);
+
+    if (!enemy.isAlive()) {
+      this.events.emit('message', `${enemy.name} defeated!`);
+      this.player.kills++;
+
+      const xp = calculateXpReward(this.floor);
+      const leveledUp = this.player.addXp(xp);
+      if (leveledUp) {
+        this.events.emit('message', `Level up! You are now level ${this.player.level}!`);
+      }
+
+      // Drop loot
+      const lootType = rollLoot(this.floor);
+      if (lootType && ITEM_CONFIGS[lootType]) {
+        const config = ITEM_CONFIGS[lootType];
+        const worldItem = new WorldItem(this, enemy.tileX, enemy.tileY, config);
+        this.items.push(worldItem);
+      }
+
+      enemy.destroy();
+      this.enemies = this.enemies.filter((e) => e !== enemy);
+    }
+  }
+
+  private async processEnemyTurns() {
+    for (const enemy of this.enemies) {
+      if (!enemy.isAlive() || enemy.isMoving) continue;
+
+      const dist = manhattanDistance(
+        enemy.tileX,
+        enemy.tileY,
+        this.player.tileX,
+        this.player.tileY,
+      );
+
+      if (dist > enemy.detectionRange) continue;
+
+      // Adjacent — attack player
+      if (dist === 1) {
+        const result = resolveAttack(enemy.stats, this.player.stats);
+        this.player.takeDamage(result.damage);
+        this.player.flashDamage(this);
+        showDamageNumber(
+          this,
+          this.player.tileX,
+          this.player.tileY,
+          result.damage,
+          result.isCritical,
+        );
+        this.events.emit('message', `${enemy.name} hits you for ${result.damage} damage!`);
+
+        if (!this.player.isAlive()) {
+          this.gameOver();
+          return;
+        }
+        continue;
+      }
+
+      // Move toward player
+      let moveX = enemy.tileX;
+      let moveY = enemy.tileY;
+
+      if (enemy.usesPathfinding) {
+        const path = findPath(
+          this.dungeon.grid,
+          enemy.tileX,
+          enemy.tileY,
+          this.player.tileX,
+          this.player.tileY,
+          50,
+        );
+        if (path && path.length > 0) {
+          moveX = path[0].x;
+          moveY = path[0].y;
+        }
+      } else {
+        const ddx = Math.sign(this.player.tileX - enemy.tileX);
+        const ddy = Math.sign(this.player.tileY - enemy.tileY);
+
+        if (ddx !== 0 && canMoveTo(this.dungeon.grid, enemy.tileX + ddx, enemy.tileY)) {
+          moveX = enemy.tileX + ddx;
+        } else if (ddy !== 0 && canMoveTo(this.dungeon.grid, enemy.tileX, enemy.tileY + ddy)) {
+          moveY = enemy.tileY + ddy;
+        }
+      }
+
+      const occupied = this.enemies.some(
+        (e) => e !== enemy && e.tileX === moveX && e.tileY === moveY,
+      );
+      const playerOccupies = this.player.tileX === moveX && this.player.tileY === moveY;
+
+      if (!occupied && !playerOccupies && (moveX !== enemy.tileX || moveY !== enemy.tileY)) {
+        await enemy.moveTo(this, moveX, moveY, 80);
+      }
+    }
+  }
+
+  private pickupItems() {
+    const here = this.items.filter(
+      (item) => item.tileX === this.player.tileX && item.tileY === this.player.tileY,
+    );
+
+    for (const worldItem of here) {
+      const config = worldItem.config;
+      const effect = config.effect;
+
+      if (effect.kind === 'gold') {
+        this.player.gold += effect.amount;
+        this.events.emit('message', `Picked up ${config.name} (+${effect.amount} gold)`);
+        worldItem.destroy();
+        this.items = this.items.filter((i) => i !== worldItem);
+      } else if (effect.kind === 'heal') {
+        const invItem: InventoryItem = {
+          id: `${config.type}_${Date.now()}`,
+          type: config.type,
+          name: config.name,
+          description: config.description,
+          stackable: true,
+          count: 1,
+        };
+        const result = addItem(this.player.inventory, invItem);
+        if (result.success) {
+          this.player.inventory = result.inventory;
+          this.events.emit('message', `Picked up ${config.name}`);
+          worldItem.destroy();
+          this.items = this.items.filter((i) => i !== worldItem);
+        } else {
+          this.events.emit('message', 'Inventory full!');
+        }
+      } else if (effect.kind === 'weapon') {
+        const currentAtk = this.player.equippedWeapon
+          ? (
+              ITEM_CONFIGS[this.player.equippedWeapon.type]?.effect as {
+                kind: 'weapon';
+                attack: number;
+              }
+            )?.attack || 0
+          : 0;
+        if (effect.attack > currentAtk) {
+          this.player.stats.attack = this.player.stats.attack - currentAtk + effect.attack;
+          const invItem: InventoryItem = {
+            id: `${config.type}_${Date.now()}`,
+            type: config.type,
+            name: config.name,
+            description: config.description,
+            stackable: false,
+            count: 1,
+          };
+          this.player.equippedWeapon = invItem;
+          this.events.emit('message', `Equipped ${config.name}! (ATK +${effect.attack})`);
+          worldItem.destroy();
+          this.items = this.items.filter((i) => i !== worldItem);
+        } else {
+          this.events.emit('message', `${config.name} is weaker than current weapon`);
+        }
+      }
+    }
+
+    this.events.emit('inventory-changed', this.player.inventory);
+  }
+
+  private useInventoryItem(index: number) {
+    if (index >= this.player.inventory.length) return;
+    const item = this.player.inventory[index];
+    const config = ITEM_CONFIGS[item.type];
+    if (!config) return;
+
+    if (config.effect.kind === 'heal') {
+      const healed = this.player.heal(config.effect.amount);
+      if (healed > 0) {
+        this.events.emit('message', `Used ${item.name}. Restored ${healed} HP.`);
+        if (item.stackable && item.count > 1) {
+          item.count--;
+        } else {
+          this.player.inventory.splice(index, 1);
+        }
+        this.events.emit('inventory-changed', this.player.inventory);
+        this.events.emit('hp-changed', this.player.stats.hp, this.player.stats.maxHp);
+      } else {
+        this.events.emit('message', 'Already at full health!');
+      }
+    }
+  }
+
+  private checkStairs() {
+    if (
+      this.player.tileX === this.dungeon.stairsDown.x &&
+      this.player.tileY === this.dungeon.stairsDown.y
+    ) {
+      this.floor++;
+      this.events.emit('message', `Descending to floor ${this.floor}...`);
+      this.events.emit('floor-changed', this.floor);
+      this.cleanupFloor();
+      this.generateFloor();
+    }
+  }
+
+  private cleanupFloor() {
+    this.enemies.forEach((e) => e.destroy());
+    this.enemies = [];
+    this.items.forEach((i) => i.destroy());
+    this.items = [];
+    this.tileGraphics.clear();
+    if (this.stairsSprite) this.stairsSprite.destroy();
+  }
+
+  private generateFloor() {
+    const params = getDungeonParams(this.floor);
+    this.dungeon = generateDungeon(params);
+    this.visMap = createVisibilityMap(this.dungeon.width, this.dungeon.height);
+
+    if (this.player) {
+      this.player.tileX = this.dungeon.playerStart.x;
+      this.player.tileY = this.dungeon.playerStart.y;
+      this.player.sprite.setPosition(
+        this.dungeon.playerStart.x * TILE_SIZE + TILE_SIZE / 2,
+        this.dungeon.playerStart.y * TILE_SIZE + TILE_SIZE / 2,
+      );
+    } else {
+      this.player = new Player(this, this.dungeon.playerStart.x, this.dungeon.playerStart.y);
+    }
+
+    // Draw stairs
+    this.stairsSprite = this.add
+      .rectangle(
+        this.dungeon.stairsDown.x * TILE_SIZE + TILE_SIZE / 2,
+        this.dungeon.stairsDown.y * TILE_SIZE + TILE_SIZE / 2,
+        TILE_SIZE - 2,
+        TILE_SIZE - 2,
+        COLORS.STAIRS,
+      )
+      .setDepth(2);
+
+    this.spawnEnemies();
+    this.spawnItems();
+
+    // Camera
+    this.cameras.main.startFollow(this.player.sprite, true, 0.1, 0.1);
+    this.cameras.main.setZoom(2.5);
+    this.cameras.main.setBounds(
+      0,
+      0,
+      this.dungeon.width * TILE_SIZE,
+      this.dungeon.height * TILE_SIZE,
+    );
+
+    this.updateVisibility();
+    this.emitUIUpdates();
+
+    this.events.emit('minimap-init', {
+      grid: this.dungeon.grid,
+      width: this.dungeon.width,
+      height: this.dungeon.height,
+    });
+
+    this.events.emit('message', `--- Floor ${this.floor} ---`);
+  }
+
+  private spawnEnemies() {
+    const params = getDungeonParams(this.floor);
+
+    for (let i = 1; i < this.dungeon.rooms.length - 1; i++) {
+      const room = this.dungeon.rooms[i];
+      const count = randomInt(1, params.maxEnemiesPerRoom);
+
+      for (let j = 0; j < count; j++) {
+        const pos = room.getRandomTile();
+        if (this.dungeon.grid[pos.y][pos.x] !== TILE_FLOOR) continue;
+
+        const type =
+          this.floor < 3 ? randomPick(['slime', 'bat'] as EnemyType[]) : randomPick(ENEMY_TYPES);
+        const config = ENEMY_CONFIGS[type](this.floor);
+        const enemy = new Enemy(this, pos.x, pos.y, config);
+        this.enemies.push(enemy);
+      }
+    }
+  }
+
+  private spawnItems() {
+    const params = getDungeonParams(this.floor);
+
+    for (let i = 1; i < this.dungeon.rooms.length; i++) {
+      const room = this.dungeon.rooms[i];
+      if (Math.random() < 0.6) {
+        const count = randomInt(0, params.maxItemsPerRoom);
+        for (let j = 0; j < count; j++) {
+          const pos = room.getRandomTile();
+          if (this.dungeon.grid[pos.y][pos.x] !== TILE_FLOOR) continue;
+
+          const lootType = rollLoot(this.floor);
+          if (lootType && ITEM_CONFIGS[lootType]) {
+            const worldItem = new WorldItem(this, pos.x, pos.y, ITEM_CONFIGS[lootType]);
+            this.items.push(worldItem);
+          }
+        }
+      }
+    }
+  }
+
+  private updateVisibility() {
+    updateFOV(this.dungeon.grid, this.visMap, this.player.tileX, this.player.tileY, FOV_RADIUS);
+    this.renderTiles();
+    this.updateEntityVisibility();
+
+    this.events.emit('minimap-update', {
+      grid: this.dungeon.grid,
+      visMap: this.visMap,
+      playerX: this.player.tileX,
+      playerY: this.player.tileY,
     });
   }
 
-  private generateDungeon() {
-    // Initialize grid with walls (1 = wall, 0 = floor)
-    this.grid = Array.from({ length: this.dungeonHeight }, () =>
-      Array.from({ length: this.dungeonWidth }, () => 1),
-    );
+  private renderTiles() {
+    this.tileGraphics.clear();
 
-    // Simple BSP-like room generation
-    const rooms: { x: number; y: number; w: number; h: number }[] = [];
-    const numRooms = 8;
+    const cam = this.cameras.main;
+    const zoom = cam.zoom;
+    const halfW = cam.width / (2 * zoom);
+    const halfH = cam.height / (2 * zoom);
+    const cx = cam.scrollX + cam.width / (2 * zoom);
+    const cy = cam.scrollY + cam.height / (2 * zoom);
 
-    for (let i = 0; i < numRooms; i++) {
-      const w = Phaser.Math.Between(5, 10);
-      const h = Phaser.Math.Between(4, 8);
-      const x = Phaser.Math.Between(1, this.dungeonWidth - w - 1);
-      const y = Phaser.Math.Between(1, this.dungeonHeight - h - 1);
+    const startX = Math.max(0, Math.floor((cx - halfW) / TILE_SIZE) - 1);
+    const endX = Math.min(this.dungeon.width - 1, Math.ceil((cx + halfW) / TILE_SIZE) + 1);
+    const startY = Math.max(0, Math.floor((cy - halfH) / TILE_SIZE) - 1);
+    const endY = Math.min(this.dungeon.height - 1, Math.ceil((cy + halfH) / TILE_SIZE) + 1);
 
-      // Check overlap
-      let overlaps = false;
-      for (const room of rooms) {
-        if (
-          x < room.x + room.w + 1 &&
-          x + w + 1 > room.x &&
-          y < room.y + room.h + 1 &&
-          y + h + 1 > room.y
-        ) {
-          overlaps = true;
-          break;
-        }
-      }
-      if (overlaps) continue;
-
-      // Carve room
-      for (let ry = y; ry < y + h; ry++) {
-        for (let rx = x; rx < x + w; rx++) {
-          this.grid[ry][rx] = 0;
-        }
-      }
-      rooms.push({ x, y, w, h });
-    }
-
-    // Connect rooms with corridors
-    for (let i = 1; i < rooms.length; i++) {
-      const prev = rooms[i - 1];
-      const curr = rooms[i];
-      const prevCenterX = Math.floor(prev.x + prev.w / 2);
-      const prevCenterY = Math.floor(prev.y + prev.h / 2);
-      const currCenterX = Math.floor(curr.x + curr.w / 2);
-      const currCenterY = Math.floor(curr.y + curr.h / 2);
-
-      // Horizontal corridor then vertical
-      const startX = Math.min(prevCenterX, currCenterX);
-      const endX = Math.max(prevCenterX, currCenterX);
+    for (let y = startY; y <= endY; y++) {
       for (let x = startX; x <= endX; x++) {
-        this.grid[prevCenterY][x] = 0;
-      }
+        const vis = this.visMap[y][x];
+        if (vis === 'hidden') continue;
 
-      const startY = Math.min(prevCenterY, currCenterY);
-      const endY = Math.max(prevCenterY, currCenterY);
-      for (let y = startY; y <= endY; y++) {
-        this.grid[y][currCenterX] = 0;
-      }
-    }
-  }
+        const px = x * TILE_SIZE;
+        const py = y * TILE_SIZE;
 
-  private renderDungeon() {
-    for (let y = 0; y < this.dungeonHeight; y++) {
-      for (let x = 0; x < this.dungeonWidth; x++) {
-        const posX = x * TILE_SIZE + TILE_SIZE / 2;
-        const posY = y * TILE_SIZE + TILE_SIZE / 2;
-
-        if (this.grid[y][x] === 1) {
-          const wall = this.add.rectangle(posX, posY, TILE_SIZE, TILE_SIZE, COLORS.WALL);
-          this.walls.push(wall);
+        if (this.dungeon.grid[y][x] === TILE_FLOOR) {
+          this.tileGraphics.fillStyle(vis === 'visible' ? COLORS.FLOOR : 0x252540, 1);
         } else {
-          const floor = this.add.rectangle(posX, posY, TILE_SIZE, TILE_SIZE, COLORS.FLOOR);
-          this.floors.push(floor);
+          this.tileGraphics.fillStyle(vis === 'visible' ? COLORS.WALL : 0x0e1225, 1);
         }
+        this.tileGraphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
       }
     }
   }
 
-  private findOpenTile(): { x: number; y: number } {
-    for (let y = 0; y < this.dungeonHeight; y++) {
-      for (let x = 0; x < this.dungeonWidth; x++) {
-        if (this.grid[y][x] === 0) {
-          return { x, y };
-        }
-      }
+  private updateEntityVisibility() {
+    for (const enemy of this.enemies) {
+      const vis = this.visMap[enemy.tileY]?.[enemy.tileX];
+      enemy.sprite.setVisible(vis === 'visible');
     }
-    return { x: 1, y: 1 };
+
+    for (const item of this.items) {
+      const vis = this.visMap[item.tileY]?.[item.tileX];
+      item.sprite.setVisible(vis === 'visible' || vis === 'seen');
+      item.sprite.setAlpha(vis === 'seen' ? 0.4 : 1);
+    }
+
+    if (this.stairsSprite) {
+      const sVis = this.visMap[this.dungeon.stairsDown.y]?.[this.dungeon.stairsDown.x];
+      this.stairsSprite.setVisible(sVis === 'visible' || sVis === 'seen');
+      this.stairsSprite.setAlpha(sVis === 'seen' ? 0.4 : 1);
+    }
+  }
+
+  private emitUIUpdates() {
+    this.events.emit('hp-changed', this.player.stats.hp, this.player.stats.maxHp);
+    this.events.emit('stats-changed', { level: this.player.level, gold: this.player.gold });
+    this.events.emit('inventory-changed', this.player.inventory);
+  }
+
+  private gameOver() {
+    this.scene.stop('UIScene');
+    this.scene.start('GameOverScene', {
+      floor: this.floor,
+      kills: this.player.kills,
+      gold: this.player.gold,
+      level: this.player.level,
+    });
   }
 }
