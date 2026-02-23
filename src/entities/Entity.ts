@@ -3,7 +3,7 @@ import { TILE_SIZE, COLORS } from '../constants';
 import { CombatStats } from '../systems/CombatSystem';
 
 export class Entity {
-  sprite: Phaser.GameObjects.Rectangle;
+  sprite: Phaser.GameObjects.Image | Phaser.GameObjects.Rectangle;
   tileX: number;
   tileY: number;
   stats: CombatStats;
@@ -13,6 +13,7 @@ export class Entity {
     scene: Phaser.Scene,
     tileX: number,
     tileY: number,
+    texture: string | null,
     color: number,
     stats: CombatStats,
   ) {
@@ -20,13 +21,14 @@ export class Entity {
     this.tileY = tileY;
     this.stats = { ...stats };
 
-    this.sprite = scene.add.rectangle(
-      tileX * TILE_SIZE + TILE_SIZE / 2,
-      tileY * TILE_SIZE + TILE_SIZE / 2,
-      TILE_SIZE - 2,
-      TILE_SIZE - 2,
-      color,
-    );
+    const px = tileX * TILE_SIZE + TILE_SIZE / 2;
+    const py = tileY * TILE_SIZE + TILE_SIZE / 2;
+
+    if (texture && scene.textures.exists(texture)) {
+      this.sprite = scene.add.image(px, py, texture).setDisplaySize(TILE_SIZE, TILE_SIZE);
+    } else {
+      this.sprite = scene.add.rectangle(px, py, TILE_SIZE - 2, TILE_SIZE - 2, color);
+    }
     this.sprite.setDepth(10);
   }
 
@@ -60,13 +62,23 @@ export class Entity {
   }
 
   flashDamage(scene: Phaser.Scene): void {
-    const originalColor = this.sprite.fillColor;
-    this.sprite.setFillStyle(0xff0000);
-    scene.time.delayedCall(100, () => {
-      if (this.sprite.active) {
-        this.sprite.setFillStyle(originalColor);
-      }
-    });
+    if (this.sprite instanceof Phaser.GameObjects.Image) {
+      this.sprite.setTint(0xff0000);
+      scene.time.delayedCall(100, () => {
+        if (this.sprite.active && this.sprite instanceof Phaser.GameObjects.Image) {
+          this.sprite.clearTint();
+        }
+      });
+    } else {
+      const rect = this.sprite as Phaser.GameObjects.Rectangle;
+      const originalColor = rect.fillColor;
+      rect.setFillStyle(0xff0000);
+      scene.time.delayedCall(100, () => {
+        if (rect.active) {
+          rect.setFillStyle(originalColor);
+        }
+      });
+    }
   }
 
   destroy(): void {

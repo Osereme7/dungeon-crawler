@@ -26,7 +26,7 @@ export class GameScene extends Phaser.Scene {
   private visMap!: Visibility[][];
   private floor = 1;
   private tileGraphics!: Phaser.GameObjects.Graphics;
-  private stairsSprite!: Phaser.GameObjects.Rectangle;
+  private stairsSprite!: Phaser.GameObjects.Image | Phaser.GameObjects.Rectangle;
 
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd!: Record<string, Phaser.Input.Keyboard.Key>;
@@ -103,6 +103,7 @@ export class GameScene extends Phaser.Scene {
       await this.attackEnemy(targetEnemy);
     } else if (canMoveTo(this.dungeon.grid, newX, newY)) {
       await this.player.moveTo(this, newX, newY);
+      this.playSound('sfx-step');
       this.pickupItems();
       this.checkStairs();
     }
@@ -128,18 +129,23 @@ export class GameScene extends Phaser.Scene {
     enemy.takeDamage(result.damage);
     enemy.flashDamage(this);
     showDamageNumber(this, enemy.tileX, enemy.tileY, result.damage, result.isCritical);
+    this.playSound(result.isCritical ? 'sfx-crit' : 'sfx-hit');
+    this.cameras.main.shake(80, 0.005);
 
     const critText = result.isCritical ? ' CRITICAL!' : '';
     this.events.emit('message', `You hit ${enemy.name} for ${result.damage} damage!${critText}`);
 
     if (!enemy.isAlive()) {
       this.events.emit('message', `${enemy.name} defeated!`);
+      this.playSound('sfx-kill');
+      this.spawnDeathParticles(enemy.tileX, enemy.tileY);
       this.player.kills++;
 
       const xp = calculateXpReward(this.floor);
       const leveledUp = this.player.addXp(xp);
       if (leveledUp) {
         this.events.emit('message', `Level up! You are now level ${this.player.level}!`);
+        this.playSound('sfx-levelup');
       }
 
       // Drop loot
@@ -181,6 +187,8 @@ export class GameScene extends Phaser.Scene {
           result.isCritical,
         );
         this.events.emit('message', `${enemy.name} hits you for ${result.damage} damage!`);
+        this.playSound('sfx-hurt');
+        this.cameras.main.shake(100, 0.008);
 
         if (!this.player.isAlive()) {
           this.gameOver();
@@ -240,6 +248,7 @@ export class GameScene extends Phaser.Scene {
       if (effect.kind === 'gold') {
         this.player.gold += effect.amount;
         this.events.emit('message', `Picked up ${config.name} (+${effect.amount} gold)`);
+        this.playSound('sfx-pickup');
         worldItem.destroy();
         this.items = this.items.filter((i) => i !== worldItem);
       } else if (effect.kind === 'heal') {
@@ -255,6 +264,7 @@ export class GameScene extends Phaser.Scene {
         if (result.success) {
           this.player.inventory = result.inventory;
           this.events.emit('message', `Picked up ${config.name}`);
+          this.playSound('sfx-pickup');
           worldItem.destroy();
           this.items = this.items.filter((i) => i !== worldItem);
         } else {
@@ -281,6 +291,7 @@ export class GameScene extends Phaser.Scene {
           };
           this.player.equippedWeapon = invItem;
           this.events.emit('message', `Equipped ${config.name}! (ATK +${effect.attack})`);
+          this.playSound('sfx-pickup');
           worldItem.destroy();
           this.items = this.items.filter((i) => i !== worldItem);
         } else {
@@ -302,6 +313,7 @@ export class GameScene extends Phaser.Scene {
       const healed = this.player.heal(config.effect.amount);
       if (healed > 0) {
         this.events.emit('message', `Used ${item.name}. Restored ${healed} HP.`);
+        this.playSound('sfx-potion');
         if (item.stackable && item.count > 1) {
           item.count--;
         } else {
@@ -323,6 +335,7 @@ export class GameScene extends Phaser.Scene {
       this.floor++;
       this.events.emit('message', `Descending to floor ${this.floor}...`);
       this.events.emit('floor-changed', this.floor);
+      this.playSound('sfx-stairs');
       this.cleanupFloor();
       this.generateFloor();
     }
@@ -354,15 +367,18 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Draw stairs
-    this.stairsSprite = this.add
-      .rectangle(
-        this.dungeon.stairsDown.x * TILE_SIZE + TILE_SIZE / 2,
-        this.dungeon.stairsDown.y * TILE_SIZE + TILE_SIZE / 2,
-        TILE_SIZE - 2,
-        TILE_SIZE - 2,
-        COLORS.STAIRS,
-      )
-      .setDepth(2);
+    const stairsX = this.dungeon.stairsDown.x * TILE_SIZE + TILE_SIZE / 2;
+    const stairsY = this.dungeon.stairsDown.y * TILE_SIZE + TILE_SIZE / 2;
+    if (this.textures.exists('stairs')) {
+      this.stairsSprite = this.add
+        .image(stairsX, stairsY, 'stairs')
+        .setDisplaySize(TILE_SIZE, TILE_SIZE)
+        .setDepth(2);
+    } else {
+      this.stairsSprite = this.add
+        .rectangle(stairsX, stairsY, TILE_SIZE - 2, TILE_SIZE - 2, COLORS.STAIRS)
+        .setDepth(2);
+    }
 
     this.spawnEnemies();
     this.spawnItems();
@@ -509,5 +525,38 @@ export class GameScene extends Phaser.Scene {
       gold: this.player.gold,
       level: this.player.level,
     });
+  }
+
+  private playSound(key: string) {
+    try {
+      if (this.sound.get(key) || this.cache.audio.exists(key)) {
+        this.sound.play(key, { volume: 0.5 });
+      }
+    } catch {
+      // Sound not ready yet, ignore
+    }
+  }
+
+  private spawnDeathParticles(tileX: number, tileY: number) {
+    const px = tileX * TILE_SIZE + TILE_SIZE / 2;
+    const py = tileY * TILE_SIZE + TILE_SIZE / 2;
+
+    for (let i = 0; i < 8; i++) {
+      const angle = (i / 8) * Math.PI * 2;
+      const speed = 30 + Math.random() * 40;
+
+      const particle = this.add.rectangle(px, py, 2, 2, 0xff4444).setDepth(50);
+
+      this.tweens.add({
+        targets: particle,
+        x: px + Math.cos(angle) * speed,
+        y: py + Math.sin(angle) * speed,
+        alpha: 0,
+        scale: 0.5,
+        duration: 300 + Math.random() * 200,
+        ease: 'Power2',
+        onComplete: () => particle.destroy(),
+      });
+    }
   }
 }

@@ -8,6 +8,7 @@ export interface ItemConfig {
   name: string;
   description: string;
   color: number;
+  texture: string;
   effect: ItemEffect;
 }
 
@@ -17,7 +18,7 @@ export type ItemEffect =
   | { kind: 'gold'; amount: number };
 
 export class WorldItem {
-  sprite: Phaser.GameObjects.Rectangle;
+  sprite: Phaser.GameObjects.Image | Phaser.GameObjects.Rectangle;
   tileX: number;
   tileY: number;
   config: ItemConfig;
@@ -27,13 +28,14 @@ export class WorldItem {
     this.tileY = tileY;
     this.config = config;
 
-    this.sprite = scene.add.rectangle(
-      tileX * TILE_SIZE + TILE_SIZE / 2,
-      tileY * TILE_SIZE + TILE_SIZE / 2,
-      TILE_SIZE / 2,
-      TILE_SIZE / 2,
-      config.color,
-    );
+    const px = tileX * TILE_SIZE + TILE_SIZE / 2;
+    const py = tileY * TILE_SIZE + TILE_SIZE / 2;
+
+    if (config.texture && scene.textures.exists(config.texture)) {
+      this.sprite = scene.add.image(px, py, config.texture).setDisplaySize(TILE_SIZE, TILE_SIZE);
+    } else {
+      this.sprite = scene.add.rectangle(px, py, TILE_SIZE / 2, TILE_SIZE / 2, config.color);
+    }
     this.sprite.setDepth(5);
   }
 
@@ -48,6 +50,7 @@ export const ITEM_CONFIGS: Record<string, ItemConfig> = {
     name: 'Health Potion',
     description: 'Restores 30 HP',
     color: 0xff4444,
+    texture: 'item-health-potion',
     effect: { kind: 'heal', amount: 30 },
   },
   weapon_rusty_sword: {
@@ -55,6 +58,7 @@ export const ITEM_CONFIGS: Record<string, ItemConfig> = {
     name: 'Rusty Sword',
     description: 'ATK +3',
     color: 0xaa8844,
+    texture: 'item-weapon-rusty',
     effect: { kind: 'weapon', attack: 3 },
   },
   weapon_iron_sword: {
@@ -62,6 +66,7 @@ export const ITEM_CONFIGS: Record<string, ItemConfig> = {
     name: 'Iron Sword',
     description: 'ATK +6',
     color: 0xccccdd,
+    texture: 'item-weapon-iron',
     effect: { kind: 'weapon', attack: 6 },
   },
   weapon_fire_blade: {
@@ -69,6 +74,7 @@ export const ITEM_CONFIGS: Record<string, ItemConfig> = {
     name: 'Fire Blade',
     description: 'ATK +10',
     color: 0xff6600,
+    texture: 'item-weapon-fire',
     effect: { kind: 'weapon', attack: 10 },
   },
   treasure_gold: {
@@ -76,6 +82,7 @@ export const ITEM_CONFIGS: Record<string, ItemConfig> = {
     name: 'Gold Coins',
     description: 'Worth 25 gold',
     color: 0xffd700,
+    texture: 'item-gold',
     effect: { kind: 'gold', amount: 25 },
   },
   treasure_gem: {
@@ -83,6 +90,7 @@ export const ITEM_CONFIGS: Record<string, ItemConfig> = {
     name: 'Gemstone',
     description: 'Worth 100 gold',
     color: 0x44ddff,
+    texture: 'item-gem',
     effect: { kind: 'gold', amount: 100 },
   },
 };

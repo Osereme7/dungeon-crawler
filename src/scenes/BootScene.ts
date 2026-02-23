@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { GAME_WIDTH, GAME_HEIGHT, COLORS } from '../constants';
+import { generateAllSprites } from '../sprites/SpriteGenerator';
+import { generateAllSounds } from '../audio/SoundGenerator';
 
 export class BootScene extends Phaser.Scene {
   constructor() {
@@ -35,18 +37,15 @@ export class BootScene extends Phaser.Scene {
       progressBox.destroy();
       loadingText.destroy();
     });
-
-    // Placeholder: load a 1x1 pixel as a texture we can tint later
-    const canvas = document.createElement('canvas');
-    canvas.width = 1;
-    canvas.height = 1;
-    const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, 1, 1);
-    this.textures.addCanvas('pixel', canvas);
   }
 
   create() {
+    // Generate all pixel art sprites
+    generateAllSprites(this);
+
+    // Generate all sound effects
+    generateAllSounds(this);
+
     this.scene.start('MenuScene');
   }
 }

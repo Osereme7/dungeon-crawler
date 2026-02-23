@@ -8,6 +8,7 @@ export interface EnemyConfig {
   type: EnemyType;
   name: string;
   color: number;
+  texture: string;
   stats: CombatStats;
   detectionRange: number;
   xpReward: number;
@@ -22,7 +23,7 @@ export class Enemy extends Entity {
   readonly usesPathfinding: boolean;
 
   constructor(scene: Phaser.Scene, tileX: number, tileY: number, config: EnemyConfig) {
-    super(scene, tileX, tileY, config.color, config.stats);
+    super(scene, tileX, tileY, config.texture, config.color, config.stats);
     this.enemyType = config.type;
     this.name = config.name;
     this.detectionRange = config.detectionRange;
@@ -36,6 +37,7 @@ export const ENEMY_CONFIGS: Record<EnemyType, (floor: number) => EnemyConfig> = 
     type: 'slime',
     name: 'Slime',
     color: 0x44ff44,
+    texture: 'enemy-slime',
     stats: {
       hp: 15 + floor * 3,
       maxHp: 15 + floor * 3,
@@ -51,6 +53,7 @@ export const ENEMY_CONFIGS: Record<EnemyType, (floor: number) => EnemyConfig> = 
     type: 'bat',
     name: 'Bat',
     color: 0x9944cc,
+    texture: 'enemy-bat',
     stats: {
       hp: 10 + floor * 2,
       maxHp: 10 + floor * 2,
@@ -66,6 +69,7 @@ export const ENEMY_CONFIGS: Record<EnemyType, (floor: number) => EnemyConfig> = 
     type: 'skeleton',
     name: 'Skeleton',
     color: 0xcccccc,
+    texture: 'enemy-skeleton',
     stats: {
       hp: 25 + floor * 5,
       maxHp: 25 + floor * 5,

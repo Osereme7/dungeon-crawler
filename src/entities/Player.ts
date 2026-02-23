@@ -20,7 +20,7 @@ export class Player extends Entity {
       attack: 10,
       defense: 3,
     };
-    super(scene, tileX, tileY, COLORS.PLAYER, stats);
+    super(scene, tileX, tileY, 'player-sheet', COLORS.PLAYER, stats);
     this.xpToNext = calculateLevelUp(this.level);
   }
 
