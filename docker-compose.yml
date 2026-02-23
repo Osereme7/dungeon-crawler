@@ -1,0 +1,15 @@
+services:
+  dungeon-crawler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dungeon-crawler:${IMAGE_TAG:-latest}
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
